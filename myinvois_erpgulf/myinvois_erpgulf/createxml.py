@@ -40,6 +40,52 @@ CREDIT_NOTE = "02 : Credit Note"
 DEBIT_NOTE =  "03 :  Debit Note"
 REFUND = "04 :  Refund Note"
 
+STOCK_UNIT_CODE = "XCT"  # UN/ECE Rec 20: Carton
+
+
+def get_line_unit_attrs(single_item):
+    """Return InvoicedQuantity attributes: XCT for stock items, none (blank) otherwise."""
+    try:
+        is_stock = frappe.get_cached_value("Item", single_item.item_code, "is_stock_item")
+    except Exception:
+        is_stock = 0
+    return {"unitCode": STOCK_UNIT_CODE} if is_stock else {}
+
+
+def get_line_description(single_item):
+    """Plain-text item description (HTML stripped); falls back to item name."""
+    import html as _html
+
+    desc = ""
+    if single_item.description:
+        raw = str(single_item.description)
+        # Treat block-level tags / line breaks as line separators before stripping
+        raw = re.sub(r"(?i)<br\s*/?>|</(p|div|li|h[1-6]|tr)>", "\n", raw)
+        raw = frappe.utils.strip_html_tags(raw)
+        raw = _html.unescape(_html.unescape(raw))
+        raw = raw.replace("﻿", "").replace("​", "").replace("\xa0", " ")
+        lines = [" ".join(l.split()) for l in raw.splitlines()]
+        lines = [l for l in lines if l]
+        parts = []
+        for l in lines:
+            if parts and parts[-1][-1] not in ".:;,!?":
+                parts[-1] += "."
+            parts.append(l)
+        desc = " ".join(parts)
+    if not desc and single_item.item_name:
+        desc = str(single_item.item_name)
+    return desc
+
+
+def get_customer_legal_name(sales_invoice_doc, customer_doc):
+    """Buyer legal name: Customer Taxpayer Name, else Customer Name."""
+    return (
+        (getattr(customer_doc, "custom_customer_taxpayer_name", None) or "").strip()
+        or (getattr(sales_invoice_doc, "custom_customer_taxpayer_name", None) or "").strip()
+        or customer_doc.customer_name
+    )
+
+
 def get_icv_code(invoice_number):
     """Extracts the numeric part from the invoice number to generate the ICV code"""
     try:
@@ -121,6 +167,13 @@ def handle_special_invoice_type(invoice_document_reference, sales_invoice_doc):
 def add_billing_reference(invoice, invoice_number, sales_invoice_doc):
     """Adds BillingReference with InvoiceDocumentReference to the invoice"""
     try:
+        # Bill reference is optional for normal invoices - only send for notes
+        if sales_invoice_doc.custom_invoicetype_code not in [
+            CREDIT_NOTE,
+            DEBIT_NOTE,
+            REFUND,
+        ]:
+            return None
         billing_reference = create_element(invoice, "cac:BillingReference")
         invoice_document_reference = create_element(
             billing_reference, "cac:InvoiceDocumentReference"
@@ -268,10 +321,7 @@ def salesinvoice_data(invoice, sales_invoice_doc, company_abbr):
         create_element(invoice, "cbc:DocumentCurrencyCode", sales_invoice_doc.currency)
         create_element(invoice, "cbc:TaxCurrencyCode", sales_invoice_doc.currency)
 
-        inv_period = create_element(invoice, "cac:InvoicePeriod")
-        create_element(inv_period, "cbc:StartDate", str(sales_invoice_doc.posting_date))
-        create_element(inv_period, "cbc:EndDate", str(sales_invoice_doc.due_date))
-        create_element(inv_period, DESCRIPTION, "Monthly")
+        # InvoicePeriod (Frequency of Billing / Billing Period) is optional - not sent.
 
         add_billing_reference(invoice, sales_invoice_doc.name, sales_invoice_doc)
 
@@ -368,12 +418,9 @@ def company_data(invoice, sales_invoice_doc):
         if address.address_line2:
             add_line2 = ET.SubElement(post_add, ADDRESS_LINE)
             ET.SubElement(add_line2, LINE).text = address.address_line2
-        if not address.address_line1 or not address.address_line2:
-            frappe.throw(_("Company address must have both Address Line 1 and Address Line 2."))
-        # Combined city and postal code
-        combined_city_pincode = f"{address.city}, {address.pincode}"
-        add_line3 = ET.SubElement(post_add, ADDRESS_LINE)
-        ET.SubElement(add_line3,LINE).text = combined_city_pincode
+        if not address.address_line1:
+            frappe.throw(_("Company address must have Address Line 1."))
+        # City and postcode are sent in CityName / PostalZone - not repeated as an address line
 
         # Country
         cntry = ET.SubElement(post_add, COUNTRY)
@@ -489,7 +536,8 @@ def customer_data(invoice, sales_invoice_doc):
         value_id4 = ET.SubElement(partyid_4, CBC_ID, schemeID="TTX")
         value_id4.text = (
             str(customer_doc.custom_tourism_tax_number)
-            if str(customer_doc.custom_tourism_tax_number)
+            if getattr(customer_doc, "custom_tourism_tax_number", None)
+            and not is_na(customer_doc.custom_tourism_tax_number)
             else "NA"
         )
 
@@ -498,8 +546,8 @@ def customer_data(invoice, sales_invoice_doc):
         else:
             address = frappe.get_doc("Address", customer_doc.customer_primary_address)
 
-        if not address.address_line1 or not address.address_line2:
-            frappe.throw(_("Customer address must have both Address Line 1 and Address Line 2 filled."))
+        if not address.address_line1:
+            frappe.throw(_("Customer address must have Address Line 1 filled."))
             
         posta_address = ET.SubElement(cac_party, POSTAL_ADDRESS)
         name_city = ET.SubElement(posta_address, CITY_NAME)
@@ -520,14 +568,11 @@ def customer_data(invoice, sales_invoice_doc):
         add_line1 = ET.SubElement(add_cust_line1,LINE)
         add_line1.text = address.address_line1
 
-        add_cust_line2 = ET.SubElement(posta_address,ADDRESS_LINE)
-        add_line2 = ET.SubElement(add_cust_line2, LINE)
-        add_line2.text = address.address_line2
-
-        combined_city_pincode = f"{address.city}, {address.pincode}"
-        add_cust_line3 = ET.SubElement(posta_address, ADDRESS_LINE)
-        add_line3 = ET.SubElement(add_cust_line3, LINE)
-        add_line3.text = combined_city_pincode
+        if address.address_line2:
+            add_cust_line2 = ET.SubElement(posta_address,ADDRESS_LINE)
+            add_line2 = ET.SubElement(add_cust_line2, LINE)
+            add_line2.text = address.address_line2
+        # City and postcode are sent in CityName / PostalZone - not repeated as an address line
 
         cnty_customer = ET.SubElement(posta_address, COUNTRY)
         idntfn_code_val = ET.SubElement(
@@ -547,7 +592,7 @@ def customer_data(invoice, sales_invoice_doc):
         if company_doc.custom_send_customer_code_to_lhdn:
             reg_name_val.text = sales_invoice_doc.customer
         else:
-            reg_name_val.text = customer_doc.customer_name
+            reg_name_val.text = get_customer_legal_name(sales_invoice_doc, customer_doc)
 
         cont_customer = ET.SubElement(cac_party, "cac:Contact")
         if not address.phone:
@@ -566,7 +611,12 @@ def customer_data(invoice, sales_invoice_doc):
 
 
 def delivery_data(invoice, sales_invoice_doc):
-    """Adds the Delivery data to the invoice"""
+    """Shipping recipient (cac:Delivery) is optional under LHDN - not sent."""
+    return invoice
+
+
+def _delivery_data_unused(invoice, sales_invoice_doc):
+    """Original Delivery builder - retained for reference, not called."""
     try:
         customer_doc = frappe.get_doc("Customer", sales_invoice_doc.customer)
 
@@ -648,7 +698,12 @@ def delivery_data(invoice, sales_invoice_doc):
 
 
 def payment_data(invoice, sales_invoice_doc):
-    """Adds PaymentMeans, PaymentTerms, and PrepaidPayment to the invoice based on the payment mode"""
+    """Payment mode, bank account, payment terms and prepayment are optional under LHDN - not sent."""
+    return invoice
+
+
+def _payment_data_unused(invoice, sales_invoice_doc):
+    """Original payment builder - retained for reference, not called."""
     try:
         payment_mode_code_map = {
             "Cash": "01",
@@ -941,7 +996,7 @@ def invoice_line_item(invoice, sales_invoice_doc):
             item_qty = ET.SubElement(
                 invoice_line,
                 "cbc:InvoicedQuantity",
-                unitCode="H87",
+                get_line_unit_attrs(single_item),
             )
             item_qty.text = str(abs(single_item.qty))
 
@@ -1020,15 +1075,7 @@ def invoice_line_item(invoice, sales_invoice_doc):
             item_data = ET.SubElement(invoice_line, "cac:Item")
             descp_item = ET.SubElement(item_data, DESCRIPTION)
             
-            desc = ""
-            if single_item.description and single_item.item_name:
-                desc = f"{single_item.description} - {single_item.item_name}"
-            elif single_item.description:
-                desc = str(single_item.description)
-            elif single_item.item_name:
-                desc = str(single_item.item_name)
-
-            descp_item.text = desc
+            descp_item.text = get_line_description(single_item)
             
 
             comm_class_cod = ET.SubElement(item_data, "cac:CommodityClassification")
@@ -1076,7 +1123,7 @@ def item_data_with_template(invoice, sales_invoice_doc):
             cbc_id = ET.SubElement(cac_invoiceline,CBC_ID)
             cbc_id.text = str(single_item.idx)
             cbc_invoicedquantity = ET.SubElement(
-                cac_invoiceline, "cbc:InvoicedQuantity", unitCode="H87"
+                cac_invoiceline, "cbc:InvoicedQuantity", get_line_unit_attrs(single_item)
             )
             cbc_invoicedquantity.text = str(abs(single_item.qty))
             cbc_lineextensionamount = ET.SubElement(
@@ -1141,14 +1188,7 @@ def item_data_with_template(invoice, sales_invoice_doc):
             cac_item = ET.SubElement(cac_invoiceline, "cac:Item")
             cbc_description = ET.SubElement(cac_item, DESCRIPTION)
           
-            if single_item.description and single_item.item_name:
-                cbc_description.text = (
-                    f"{single_item.description} - {single_item.item_name}"
-                )
-            elif single_item.description:
-                cbc_description.text = str(single_item.description)
-            elif single_item.item_name:
-                cbc_description.text = str(single_item.item_name)
+            cbc_description.text = get_line_description(single_item)
 
             cac_commodityclassification = ET.SubElement(
                 cac_item, "cac:CommodityClassification"
