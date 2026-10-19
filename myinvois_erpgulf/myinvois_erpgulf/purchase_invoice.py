@@ -10,6 +10,7 @@ from frappe import _
 import os
 import requests
 from myinvois_erpgulf.myinvois_erpgulf.taxpayerlogin import get_access_token
+from myinvois_erpgulf.myinvois_erpgulf.createxml import get_lhdn_country_code
 DESCRIPTION = "cbc:Description"
 POSTAL_ADDRESS = "cac:PostalAddress"
 CITY_NAME = "cbc:CityName"
@@ -364,9 +365,7 @@ def set_address(party_, sales_invoice_doc, company_doc):
         listAgencyID="6",
         listID="ISO3166-1",
     )
-    country_code = (frappe.get_value("Country", address.country, "code") or "").upper()
-
-    idntfn_cod.text  = "MYS" if address.country == "Malaysia" else country_code
+    idntfn_cod.text = get_lhdn_country_code(address.country)
     
 
     return address
@@ -526,9 +525,7 @@ def customer_data(invoice, sales_invoice_doc):
             listAgencyID="6",
             listID="ISO3166-1",
         )
-        country_code = (frappe.get_value("Country", address.country, "code") or "").upper()
-
-        idntfn_code_val.text = "MYS" if address.country == "Malaysia" else country_code
+        idntfn_code_val.text = get_lhdn_country_code(address.country)
      
 
         party_legalentity = ET.SubElement(cac_party, LEGAL_ENTITY)
@@ -635,9 +632,7 @@ def delivery_data(invoice, sales_invoice_doc):
             listAgencyID="6",
             listID="ISO3166-1",
         )
-        country_code = (frappe.get_value("Country", address.country, "code") or "").upper()
-
-        country_id_code.text = "MYS" if address.country == "Malaysia" else country_code
+        country_id_code.text = get_lhdn_country_code(address.country)
       
 
         party_legal_entity = ET.SubElement(delivery_party, LEGAL_ENTITY)
