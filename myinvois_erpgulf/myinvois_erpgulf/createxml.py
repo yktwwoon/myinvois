@@ -40,6 +40,22 @@ CREDIT_NOTE = "02 : Credit Note"
 DEBIT_NOTE =  "03 :  Debit Note"
 REFUND = "04 :  Refund Note"
 
+
+def get_lhdn_country_code(country):
+    """Return ISO 3166-1 alpha-3 code required by LHDN (e.g. Australia -> AUS)."""
+    if not country or country == "Malaysia":
+        return "MYS"
+    alpha2 = (frappe.get_value("Country", country, "code") or "").upper()
+    try:
+        import pycountry
+        match = pycountry.countries.get(alpha_2=alpha2)
+        if match:
+            return match.alpha_3
+    except ImportError:
+        pass
+    return alpha2
+
+
 def get_icv_code(invoice_number):
     """Extracts the numeric part from the invoice number to generate the ICV code"""
     try:
@@ -536,9 +552,7 @@ def customer_data(invoice, sales_invoice_doc):
             listAgencyID="6",
             listID="ISO3166-1",
         )
-        country_code = (frappe.get_value("Country", address.country, "code") or "").upper()
-
-        idntfn_code_val.text = "MYS" if address.country == "Malaysia" else country_code
+        idntfn_code_val.text = get_lhdn_country_code(address.country)
       
 
         party_legalentity = ET.SubElement(cac_party, PARTY_LEGAL)
@@ -636,7 +650,7 @@ def delivery_data(invoice, sales_invoice_doc):
             listAgencyID="6",
             listID="ISO3166-1",
         )
-        country_id_code.text = "MYS"
+        country_id_code.text = get_lhdn_country_code(address.country)
 
         party_legal_entity = ET.SubElement(delivery_party,PARTY_LEGAL)
         registration_name = ET.SubElement(party_legal_entity, REG_NAME)
