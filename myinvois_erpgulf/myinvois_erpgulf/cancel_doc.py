@@ -30,6 +30,11 @@ def cancel_document_wrapper(doc: Document, method: str):
 
         return
 
+    # Already cancelled on LHDN (e.g. via MyInvois portal) - allow ERPNext cancel
+    if (doc.get("custom_lhdn_status") or "").strip().lower() == "cancelled":
+        frappe.msgprint(_("Document already cancelled on LHDN. Cancelling in ERPNext only."))
+        return
+
     try:
         response_data = json.loads(doc.custom_submit_response)
     except json.JSONDecodeError:
@@ -112,7 +117,11 @@ def cancel_document_wrapper(doc: Document, method: str):
             response = requests.put(url, headers=headers, json=payload, timeout=10)
 
         # Final response handling
-        if response.status_code == 200:
+        if response.status_code != 200 and "already cancelled" in (response.text or "").lower():
+            frappe.msgprint(_("Document was already cancelled on LHDN."))
+            doc.custom_lhdn_status = "Cancelled"
+            doc.db_update()
+        elif response.status_code == 200:
             frappe.msgprint(_("LHDN document cancelled successfully."))
             frappe.msgprint(_(response.text))
             doc.custom_lhdn_status = "Cancelled"
